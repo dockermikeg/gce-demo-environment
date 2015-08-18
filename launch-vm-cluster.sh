@@ -8,8 +8,13 @@
 #    - create a directory at the same level of this script called install-files
 #    - copy docker-cs-engine-deb.sh and provision-docker-node.sh into a directory called install-files
 #    - run boot2docker on your laptop; then run this script from within the boot2docker terminal
+#    - IMPORTANT: this script, along with provision-docker-node.sh, depend heavily on the
+#                 fact that two of the nodes are named "swarm-master" and "dtr-repo."  
+#                 DO NOT CHANGE THESE NAMES.
 #
-export NODE_NAMES="node1 node2 swarm-master jenkins-slave dtr-repo"
+
+export SWARM_NODES="node1 node2" # change this line to add more swarm nodes, as desired
+export ALL_NODES="${SWARM_NODES} swarm-master jenkins-slave dtr-repo" # don't change this line
 export INSTANCE_TYPE="g1-small"
 export ZONE="us-central1-f"
 export CLOUD_PROJECT_ID="mike-graboski"
@@ -18,10 +23,12 @@ export CS_ENGINE_INSTALLER_FILE="docker-cs-engine-deb.sh"
 export BASE_DIR
 
 validate-prerequisites() {
-if [ ! -d install-files ] || [ ! -f install-files/${CS_ENGINE_INSTALLER_FILE} ]
+
+license_file="$(ls install-files/*.lic 2>/dev/null)"
+if [ ! -d install-files ] || [ ! -f install-files/${CS_ENGINE_INSTALLER_FILE} ] || [ "$license_file" == "" ]
 then
     echo "ERROR: this script needs to be run in a directory where an 'install-files' subdirectory is present."
-    echo "${CS_ENGINE_INSTALLER_FILE} also must be present in the install-files directory."
+    echo "${CS_ENGINE_INSTALLER_FILE} and the DTR license key also must be present in the install-files directory."
     exit 1
 fi
 
@@ -38,6 +45,11 @@ then
     exit 1
 fi
 
+if [[ "`docker ps 2>&1`" == *"no such file or directory"* ]]
+then
+    echo "ERROR:  You need to run this script inside a boot2docker terminal."
+    exit 1
+fi
 
 }
 
@@ -48,7 +60,7 @@ mkdir ${BASE_DIR}/keys
 
 # generate CA cert and key
 export keygen_hosts=""
-for node in ${NODE_NAMES}
+for node in ${ALL_NODES}
 do
     keygen_hosts=${keygen_hosts}" --host ${node} --host ${node}.c.${CLOUD_PROJECT_ID}.internal "
 done
@@ -60,15 +72,25 @@ docker run --rm -v ${BASE_DIR}/keys:/certs ehazlett/certm \
     ${keygen_hosts}
 }
 
+generate-swarm-config-file() {
+
+for node in $SWARM_NODES
+do
+    echo "${node}.c.${CLOUD_PROJECT_ID}.internal:2376" >> install-files/swarm_config.txt
+done
+
+}
+
 
 BASE_DIR=`pwd`
 validate-prerequisites
 generate-keys-and-certs
+generate-swarm-config-file
 
 gsutil cp ${BASE_DIR}/install-files/* gs://${CLOUD_STORAGE_BUCKET}/
 gsutil cp ${BASE_DIR}/keys/* gs://${CLOUD_STORAGE_BUCKET}/
 
-for NODE in $NODE_NAMES
+for NODE in $ALL_NODES
 do
 
 gcloud compute --project "${CLOUD_PROJECT_ID}" \
@@ -76,7 +98,7 @@ gcloud compute --project "${CLOUD_PROJECT_ID}" \
         --zone "${ZONE}" \
         --machine-type "${INSTANCE_TYPE}" \
         --network "default" \
-        --metadata $additional_options "cloud-storage-bucket=${CLOUD_STORAGE_BUCKET}" \
+        --metadata "cloud-storage-bucket=${CLOUD_STORAGE_BUCKET}" \
         "cs-installer-file=${CS_ENGINE_INSTALLER_FILE}" \
         "startup-script-url=gs://${CLOUD_STORAGE_BUCKET}/provision-docker-node.sh" \
         --maintenance-policy "MIGRATE" \
